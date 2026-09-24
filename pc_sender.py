@@ -8,7 +8,6 @@ It sends these values to the ESP32 every two seconds:
   - two GPU-fan RPM readings from LibreHardwareMonitor
   - up to three SSD composite temperatures from LibreHardwareMonitor
   - the current Windows media-session title, artist, source, and timeline
-  - Spotify album art when the active Spotify session supplies a thumbnail
 
 No readings are sent to the internet by this program. Communication is only
 between this PC and the ESP32 on the local network.
@@ -19,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import html
-import io
 import json
 import logging
 import re
@@ -31,7 +29,6 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
-import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,8 +46,6 @@ SEND_INTERVAL_SECONDS = 2.0
 UPDATE_TIMEOUT_SECONDS = 5.0
 UPDATE_RETRY_DELAY_SECONDS = 0.35
 REDISCOVERY_FAILURE_THRESHOLD = 6
-ARTWORK_STABLE_OBSERVATIONS = 2
-ARTWORK_RETRY_COOLDOWN_SECONDS = 8.0
 UNEXPECTED_RESTART_DELAY_SECONDS = 3.0
 
 # Leave this blank to automatically try localhost and every active local IPv4
@@ -76,21 +71,6 @@ except ImportError:
     MediaManager = None
     PlaybackStatus = None
 
-try:
-    from winrt.windows.storage.streams import InputStreamOptions
-except ImportError:
-    InputStreamOptions = None
-
-try:
-    from PIL import Image, ImageOps
-except ImportError:
-    Image = None
-    ImageOps = None
-
-
-ALBUM_ART_WIDTH = 128
-ALBUM_ART_HEIGHT = 128
-MAX_THUMBNAIL_BYTES = 5 * 1024 * 1024
 SYSTEM_FAN_COUNT = 7
 GPU_FAN_COUNT = 2
 STORAGE_TEMPERATURE_COUNT = 3
@@ -252,32 +232,6 @@ class MediaState:
     duration: int = 0
     album: str = ""
     is_spotify: bool = False
-    thumbnail: Any = None
-
-
-@dataclass
-class ArtworkStability:
-    """Require the same track twice before transferring its large artwork."""
-
-    candidate_key: str = ""
-    observations: int = 0
-
-    def reset(self) -> None:
-        self.candidate_key = ""
-        self.observations = 0
-
-    def observe(self, candidate_key: str) -> bool:
-        if not candidate_key:
-            self.reset()
-            return False
-
-        if candidate_key != self.candidate_key:
-            self.candidate_key = candidate_key
-            self.observations = 1
-            return False
-
-        self.observations += 1
-        return self.observations >= ARTWORK_STABLE_OBSERVATIONS
 
 
 @dataclass
@@ -396,7 +350,6 @@ async def read_media_state(manager: Any) -> MediaState:
             duration=duration,
             album=album,
             is_spotify=is_spotify,
-            thumbnail=getattr(properties, "thumbnail", None) if is_spotify else None,
         )
     except Exception as exc:  # A media app can vanish while it is queried.
         return MediaState(artist=f"Media read error: {type(exc).__name__}")
@@ -683,96 +636,16 @@ def configured_display_url() -> str | None:
     return f"http://{ip}/update"
 
 
-async def read_thumbnail_bytes(thumbnail: Any) -> bytes | None:
-    """Read a Windows media thumbnail without contacting Spotify directly."""
-    if thumbnail is None or InputStreamOptions is None:
-        return None
+def send_update(
+    url: str,
+    hardware: HardwareState,
+    media: MediaState,
+) -> None:
+    # Browser and video-player timelines are intentionally hidden. Only the
+    # Spotify desktop session sends position and duration to the display.
+    position = media.position if media.is_spotify else 0
+    duration = media.duration if media.is_spotify else 0
 
-    stream = None
-    try:
-        stream = await thumbnail.open_read_async()
-        size = int(getattr(stream, "size", 0))
-        if size <= 0 or size > MAX_THUMBNAIL_BYTES:
-            return None
-
-        destination = bytearray(size)
-        result = await stream.read_async(
-            destination, size, InputStreamOptions.NONE
-        )
-        image_bytes = bytes(memoryview(result))
-        return image_bytes or bytes(destination)
-    except Exception as exc:
-        LOGGER.warning(
-            "Spotify thumbnail read failed (%s): %s",
-            type(exc).__name__,
-            exc,
-        )
-        return None
-    finally:
-        if stream is not None:
-            try:
-                stream.close()
-            except Exception:
-                LOGGER.debug("Spotify thumbnail stream did not close cleanly.")
-
-
-def thumbnail_to_rgb565(image_bytes: bytes) -> bytes:
-    """Crop artwork to 128x128 and encode little-endian RGB565 for the ESP32."""
-    if Image is None or ImageOps is None:
-        raise RuntimeError("Pillow is not installed")
-
-    with Image.open(io.BytesIO(image_bytes)) as source_image:
-        artwork = ImageOps.fit(
-            source_image.convert("RGB"),
-            (ALBUM_ART_WIDTH, ALBUM_ART_HEIGHT),
-            method=Image.Resampling.LANCZOS,
-        )
-        rgb = artwork.tobytes()
-
-    encoded = bytearray(ALBUM_ART_WIDTH * ALBUM_ART_HEIGHT * 2)
-    output_index = 0
-    for input_index in range(0, len(rgb), 3):
-        red, green, blue = rgb[input_index:input_index + 3]
-        pixel = ((red & 0xF8) << 8) | ((green & 0xFC) << 3) | (blue >> 3)
-        encoded[output_index] = pixel & 0xFF
-        encoded[output_index + 1] = pixel >> 8
-        output_index += 2
-
-    return bytes(encoded)
-
-
-def album_art_url(update_url: str) -> str:
-    endpoint = urllib.parse.urljoin(update_url, "art")
-    separator = "&" if urllib.parse.urlsplit(endpoint).query else "?"
-    return endpoint + separator + urllib.parse.urlencode({"key": DISPLAY_API_KEY})
-
-
-def send_album_art(update_url: str, artwork: bytes) -> None:
-    expected_size = ALBUM_ART_WIDTH * ALBUM_ART_HEIGHT * 2
-    if len(artwork) != expected_size:
-        raise ValueError(f"album artwork must be exactly {expected_size} bytes")
-
-    boundary = "----CYDAlbumArt" + uuid.uuid4().hex
-    opening = (
-        f"--{boundary}\r\n"
-        'Content-Disposition: form-data; name="art"; filename="spotify.rgb565"\r\n'
-        "Content-Type: application/octet-stream\r\n\r\n"
-    ).encode("ascii")
-    body = opening + artwork + f"\r\n--{boundary}--\r\n".encode("ascii")
-    request = urllib.request.Request(
-        album_art_url(update_url),
-        data=body,
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-        method="POST",
-    )
-
-    with urllib.request.urlopen(request, timeout=5.0) as response:
-        if response.status != 200:
-            raise RuntimeError(f"ESP32 artwork upload returned HTTP {response.status}")
-
-
-def send_update(url: str, hardware: HardwareState, media: MediaState,
-                album_art_ready: bool = False) -> None:
     payload = {
         "key": DISPLAY_API_KEY,
         "cpu": "" if hardware.cpu_temperature_c is None
@@ -783,9 +656,8 @@ def send_update(url: str, hardware: HardwareState, media: MediaState,
         "artist": media.artist,
         "source": media.source,
         "playing": "1" if media.playing else "0",
-        "position": str(media.position),
-        "duration": str(media.duration),
-        "art": "ready" if album_art_ready else "clear",
+        "position": str(position),
+        "duration": str(duration),
     }
 
     for index in range(SYSTEM_FAN_COUNT):
@@ -827,17 +699,16 @@ def send_update_with_retry(
     url: str,
     hardware: HardwareState,
     media: MediaState,
-    album_art_ready: bool = False,
 ) -> None:
     """Retry one failed display update before reporting a failed cycle."""
     try:
-        send_update(url, hardware, media, album_art_ready)
+        send_update(url, hardware, media)
         return
     except Exception as first_error:
         LOGGER.warning("Update attempt failed; retrying once: %s", first_error)
 
     time.sleep(UPDATE_RETRY_DELAY_SECONDS)
-    send_update(url, hardware, media, album_art_ready)
+    send_update(url, hardware, media)
     LOGGER.info("Update retry succeeded.")
 
 
@@ -868,19 +739,9 @@ async def main() -> int:
             LOGGER.warning("Windows media service could not start: %s", exc)
             media_manager = None
 
-    if InputStreamOptions is None or Image is None:
-        LOGGER.warning("Spotify artwork support is not installed.")
-        LOGGER.warning(
-            "Run 1_INSTALL_PC_SENDER.bat, then start this program again."
-        )
-
     display_url = configured_display_url()
     consecutive_failures = 0
     last_cpu_warning = 0.0
-    active_art_key = ""
-    album_art_ready = False
-    artwork_stability = ArtworkStability()
-    last_art_attempt_at = 0.0
 
     while True:
         cycle_started = time.monotonic()
@@ -905,50 +766,6 @@ async def main() -> int:
         )
         media = await read_media_state(media_manager)
 
-        wanted_art_key = ""
-        if media.is_spotify:
-            wanted_art_key = "\x1f".join(
-                (media.source, media.title, media.artist, media.album)
-            )
-
-        if not wanted_art_key:
-            active_art_key = ""
-            album_art_ready = False
-            artwork_stability.reset()
-        elif wanted_art_key == active_art_key:
-            album_art_ready = True
-            artwork_stability.reset()
-        elif wanted_art_key != active_art_key:
-            album_art_ready = False
-            artwork_is_stable = artwork_stability.observe(wanted_art_key)
-            cooldown_finished = (
-                time.monotonic() - last_art_attempt_at
-                >= ARTWORK_RETRY_COOLDOWN_SECONDS
-            )
-            if artwork_is_stable and cooldown_finished:
-                last_art_attempt_at = time.monotonic()
-                try:
-                    thumbnail_bytes = await read_thumbnail_bytes(media.thumbnail)
-                    if thumbnail_bytes and Image is not None:
-                        artwork = await asyncio.to_thread(
-                            thumbnail_to_rgb565, thumbnail_bytes
-                        )
-                        await asyncio.to_thread(
-                            send_album_art, display_url, artwork
-                        )
-                        active_art_key = wanted_art_key
-                        album_art_ready = True
-                        artwork_stability.reset()
-                        LOGGER.info(
-                            "Loaded Spotify artwork for: %s", media.title[:55]
-                        )
-                except Exception as exc:
-                    LOGGER.warning(
-                        "Spotify artwork unavailable (%s): %s",
-                        type(exc).__name__,
-                        exc,
-                    )
-
         if (
             hardware.cpu_temperature_c is None
             and time.monotonic() - last_cpu_warning >= 60.0
@@ -965,7 +782,6 @@ async def main() -> int:
                 display_url,
                 hardware,
                 media,
-                album_art_ready,
             )
             consecutive_failures = 0
             state = "playing" if media.playing else "paused/idle"
@@ -976,9 +792,6 @@ async def main() -> int:
             )
         except Exception as exc:
             consecutive_failures += 1
-            active_art_key = ""
-            album_art_ready = False
-            artwork_stability.reset()
             LOGGER.warning(
                 "Send failed after retry (%d/%d, %s): %s",
                 consecutive_failures,

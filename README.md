@@ -10,9 +10,8 @@ This project turns the ESP32-2432S028R into a local dashboard showing:
 - the three useful motherboard fan speeds: F2, F6, and F7
 - the composite temperature of up to three SSDs
 - the current Windows media title, including compatible browser/YouTube sessions
-- Spotify album art when Spotify supplies it to Windows, drawn directly to the
-  TFT in full 16-bit RGB565 color
-- media source, play/pause state, and progress
+- a full-width media title and artist area
+- media source and play/pause state, plus progress and timing for Spotify
 
 It does **not** use touch and it does **not** log or upload readings to an external site. The Windows companion keeps only a small, entry-limited diagnostic log locally beside the script.
 
@@ -104,18 +103,16 @@ Duplicate tray and sender instances are blocked automatically. Use the visible l
 
 - When nothing is actively playing—or media is paused—the ESP32 shows the System Monitor page.
 - When Windows reports that media is actively playing, the ESP32 automatically switches to the full-screen Now Playing page. Stopping or pausing returns it to System Monitor.
-- The Now Playing page uses the full content area for 128×128 artwork, title, artist, source, progress bar, elapsed time, and duration. Sensor cards are not shown on this page. The interface remains memory-efficient at 8-bit, while Spotify artwork is layered directly onto the TFT in 16-bit RGB565 so it is not reduced to the interface palette.
-- Once displayed, album artwork remains untouched during the once-per-second progress and time refresh. Only the surrounding UI is updated, preventing the cover from flashing between frames.
+- The Now Playing page uses the full content width for the title and artist. Spotify can use up to three title lines and retains its progress bar, elapsed time, and duration. Other sources can use up to five title lines.
+- YouTube, browsers, VLC, and every non-Spotify source omit start time, progress bar, and duration so their titles have more room.
 - The System Monitor page shows CPU Package, GPU, room temperature/humidity, F2, F6, F7, and up to three SSD composite temperatures. Permanently stopped F1, F3, F4, F5, GPU1, and GPU2 readings are hidden.
 - A missing displayed fan sensor shows `--`.
 - Room temperature and humidity continue working even when the PC is off.
 - PC readings turn to `--` after 15 seconds without updates; while disconnected, the header shows the display's local IP for easy reconnection.
 - Media information comes from the Windows system media session. Opera GX, YouTube, Spotify, VLC, Edge, Chrome, and similar apps generally appear when they publish media metadata to Windows.
-- When the active session is the Spotify desktop app, its album art replaces the music-note tile. Other players keep the original tile. Artwork is read from Windows and sent only across your local network; no Spotify login or Web API credentials are used.
-- Rapidly skipped Spotify tracks do not trigger back-to-back artwork transfers. A track must be present in two consecutive media reads before its cover is sent, and a failed cover transfer waits eight seconds before another attempt. Normal sensor and media updates continue during this process.
 - Display updates use a five-second timeout and retry once before counting a failed cycle. Automatic discovery runs again only after six consecutive failed cycles.
 - Unexpected Python-level sender errors are written to the log and recover automatically after three seconds. If the entire process exits, the tray controller provides a second recovery layer by starting it again.
-- If you installed an earlier version of the companion, run `1_INSTALL_PC_SENDER.bat` again once so the artwork and system-tray dependencies are added.
+- If you installed an earlier version of the companion, no dependency reinstall is needed for this update.
 - Long titles are shortened or wrapped to fit the 320 × 240 screen.
 - No data is sent beyond the local network by this project.
 

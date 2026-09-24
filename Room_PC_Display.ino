@@ -9,8 +9,7 @@
     - automatic System Monitor and Now Playing screens
     - CPU Package, GPU, selected system fans, three SSD temperatures,
       and Windows media data received from pc_sender.py
-    - Spotify album art supplied by the Windows companion and drawn directly
-      to the TFT in full RGB565 color when available
+    - full-width media titles, with timeline details shown only for Spotify
     - automatic UDP discovery so the Windows companion normally needs no IP
     - no cloud logging and no external-site uploads
 
@@ -41,13 +40,9 @@ constexpr uint8_t BACKLIGHT_PIN = 21;
 
 constexpr int SCREEN_WIDTH = 320;
 constexpr int SCREEN_HEIGHT = 240;
-constexpr int ALBUM_ART_WIDTH = 128;
-constexpr int ALBUM_ART_HEIGHT = 128;
 constexpr int SYSTEM_FAN_COUNT = 7;
 constexpr int GPU_FAN_COUNT = 2;
 constexpr int STORAGE_TEMPERATURE_COUNT = 3;
-constexpr size_t ALBUM_ART_BYTE_COUNT =
-    ALBUM_ART_WIDTH * ALBUM_ART_HEIGHT * sizeof(uint16_t);
 
 DHT dht(DHT_PIN, DHT_TYPE);
 TFT_eSPI tft = TFT_eSPI();
@@ -100,14 +95,6 @@ bool pcOnline = false;
 long mediaPositionSeconds = 0;
 long mediaDurationSeconds = 0;
 
-uint16_t spotifyAlbumArt[ALBUM_ART_WIDTH * ALBUM_ART_HEIGHT];
-size_t albumArtUploadBytes = 0;
-bool albumArtUploadAuthorized = false;
-bool albumArtUploadValid = false;
-bool spotifyAlbumArtAvailable = false;
-bool spotifyArtworkVisibleOnTft = false;
-bool spotifyArtworkNeedsRefresh = false;
-
 bool displayDirty = true;
 
 // ------------------------------ Colors -----------------------------
@@ -124,12 +111,7 @@ constexpr uint16_t COLOR_TEXT = rgb565(242, 248, 252);
 constexpr uint16_t COLOR_MUTED = rgb565(158, 179, 194);
 constexpr uint16_t COLOR_CYAN = rgb565(84, 230, 223);
 constexpr uint16_t COLOR_AMBER = rgb565(255, 193, 90);
-constexpr uint16_t COLOR_TILE_BLUE = rgb565(31, 78, 112);
-constexpr uint16_t COLOR_TILE_PURPLE = rgb565(111, 61, 118);
 constexpr uint16_t COLOR_ERROR = rgb565(255, 105, 105);
-// This color is used only as a transparency key while an album cover is
-// already visible on the TFT. It is deliberately absent from the UI palette.
-constexpr uint16_t COLOR_ARTWORK_TRANSPARENT = rgb565(255, 0, 255);
 
 // -------------------------- String helpers -------------------------
 
@@ -227,46 +209,8 @@ void drawWiFiIcon(int x, int y, uint16_t color) {
   canvas.fillCircle(x + 8, y + 12, 1, color);
 }
 
-void drawMusicTile() {
-  canvas.fillRoundRect(16, 48, ALBUM_ART_WIDTH, ALBUM_ART_HEIGHT, 8,
-                       COLOR_TILE_BLUE);
-  canvas.fillRoundRect(80, 48, 64, ALBUM_ART_HEIGHT, 8, COLOR_TILE_PURPLE);
-  canvas.fillRect(80, 48, 56, ALBUM_ART_HEIGHT, COLOR_TILE_PURPLE);
-
-  canvas.drawLine(76, 73, 76, 138, COLOR_TEXT);
-  canvas.drawLine(77, 73, 77, 138, COLOR_TEXT);
-  canvas.drawLine(76, 73, 104, 80, COLOR_TEXT);
-  canvas.drawLine(76, 76, 104, 83, COLOR_TEXT);
-  canvas.drawLine(104, 80, 104, 130, COLOR_TEXT);
-  canvas.drawLine(105, 80, 105, 130, COLOR_TEXT);
-  canvas.fillCircle(67, 143, 9, COLOR_TEXT);
-  canvas.fillCircle(95, 135, 9, COLOR_TEXT);
-}
-
-bool shouldDrawSpotifyArtwork() {
-  return pcOnline && mediaPlaying && spotifyAlbumArtAvailable &&
-         mediaSource == "Spotify";
-}
-
-void drawMediaArtwork() {
-  // Spotify artwork is layered directly onto the TFT after the 8-bit UI
-  // sprite is pushed. Sending it through the sprite would quantize its colors.
-  if (shouldDrawSpotifyArtwork()) return;
-
-  drawMusicTile();
-}
-
-void drawFullColorSpotifyArtwork() {
-  if (!shouldDrawSpotifyArtwork()) return;
-
-  // pc_sender.py stores each pixel as a native-endian RGB565 uint16_t. Keep
-  // TFT_eSPI's RAM-image byte swapping disabled for this direct transfer, then
-  // restore the prior setting in case another drawing path changes it later.
-  const bool previousSwapBytes = tft.getSwapBytes();
-  tft.setSwapBytes(false);
-  tft.pushImage(16, 48, ALBUM_ART_WIDTH, ALBUM_ART_HEIGHT, spotifyAlbumArt);
-  tft.setSwapBytes(previousSwapBytes);
-  tft.drawRoundRect(16, 48, ALBUM_ART_WIDTH, ALBUM_ART_HEIGHT, 7, COLOR_LINE);
+bool shouldShowMediaTimeline() {
+  return pcOnline && mediaPlaying && mediaSource == "Spotify";
 }
 
 void drawNowPlayingHeader() {
@@ -296,25 +240,11 @@ void drawNowPlayingHeader() {
   canvas.setTextDatum(TL_DATUM);
 }
 
-void drawMediaText() {
-  canvas.setTextDatum(TL_DATUM);
+int drawWrappedMediaTitle(const String &rawTitle, int maximumLines) {
+  String remaining = rawTitle;
+  int linesDrawn = 0;
 
-  canvas.setTextFont(1);
-  canvas.setTextColor(COLOR_CYAN, COLOR_MEDIA_LEFT);
-  const String state = pcOnline
-                           ? (mediaPlaying ? "PLAYING FROM " : "PAUSED / ")
-                           : "STATUS / ";
-  canvas.drawString(shortenToWidth(state + upperText(mediaSource), 144, 1),
-                    158, 50);
-
-  String title = mediaTitle;
-  if (title.length() == 0) title = "Nothing playing";
-
-  canvas.setTextColor(COLOR_TEXT, COLOR_MEDIA_LEFT);
-  canvas.setTextFont(4);
-  String remaining = title;
-
-  for (int line = 0; line < 3 && remaining.length() > 0; line++) {
+  for (int line = 0; line < maximumLines && remaining.length() > 0; line++) {
     String lineText;
 
     while (remaining.length() > 0) {
@@ -327,32 +257,60 @@ void drawMediaText() {
                                    ? word
                                    : lineText + " " + word;
 
-      if (canvas.textWidth(candidate, 4) <= 144) {
+      if (canvas.textWidth(candidate, 4) <= 288) {
         lineText = candidate;
         remaining = rest;
         continue;
       }
 
       if (lineText.length() == 0) {
-        lineText = shortenToWidth(word, 144, 4);
+        lineText = shortenToWidth(word, 288, 4);
         remaining = rest;
       }
       break;
     }
 
-    if (line == 2 && remaining.length() > 0) {
-      lineText = shortenToWidth(lineText + " " + remaining, 144, 4);
+    if (line == maximumLines - 1 && remaining.length() > 0) {
+      lineText = shortenToWidth(lineText + " " + remaining, 288, 4);
       remaining = "";
     }
 
-    canvas.drawString(lineText, 158, 64 + line * 28, 4);
+    canvas.drawString(lineText, 16, 65 + line * 28, 4);
+    linesDrawn++;
   }
+
+  return linesDrawn;
+}
+
+void drawMediaText() {
+  canvas.setTextDatum(TL_DATUM);
+
+  canvas.setTextFont(1);
+  canvas.setTextColor(COLOR_CYAN, COLOR_MEDIA_LEFT);
+  const String state = pcOnline
+                           ? (mediaPlaying ? "PLAYING FROM " : "PAUSED / ")
+                           : "STATUS / ";
+  canvas.drawString(shortenToWidth(state + upperText(mediaSource), 288, 1),
+                    16, 49);
+
+  String title = mediaTitle;
+  if (title.length() == 0) title = "Nothing playing";
+
+  const bool showTimeline = shouldShowMediaTimeline();
+  canvas.setTextColor(COLOR_TEXT, COLOR_MEDIA_LEFT);
+  canvas.setTextFont(4);
+  const int titleLines = drawWrappedMediaTitle(title, showTimeline ? 3 : 5);
 
   String detail = mediaArtist;
   if (detail.length() == 0) detail = "Unknown artist";
   canvas.setTextFont(2);
   canvas.setTextColor(COLOR_MUTED, COLOR_MEDIA_LEFT);
-  canvas.drawString(shortenToWidth(detail, 144, 2), 158, 160, 2);
+  const int artistY = showTimeline
+                          ? 158
+                          : min(210, 65 + titleLines * 28 + 6);
+  canvas.drawString(shortenToWidth(detail, 288, 2), 16, artistY, 2);
+
+  if (!showTimeline) return;
 
   canvas.fillRoundRect(16, 190, 288, 6, 3, rgb565(37, 49, 59));
 
@@ -387,7 +345,6 @@ void drawNowPlayingScreen() {
   canvas.fillRoundRect(6, 35, 308, 199, 7, COLOR_MEDIA_LEFT);
   canvas.drawRoundRect(6, 35, 308, 199, 7, COLOR_LINE);
 
-  drawMediaArtwork();
   drawMediaText();
 }
 
@@ -538,8 +495,6 @@ void drawMonitoringScreen() {
 }
 
 void drawDisplay() {
-  const bool showSpotifyArtwork = shouldDrawSpotifyArtwork();
-
   canvas.fillSprite(COLOR_BG);
 
   if (pcOnline && mediaPlaying) {
@@ -548,27 +503,7 @@ void drawDisplay() {
     drawMonitoringScreen();
   }
 
-  if (showSpotifyArtwork && spotifyArtworkVisibleOnTft) {
-    // Preserve the full-color artwork already on the LCD. Without this
-    // transparent window, the once-per-second UI refresh briefly paints the
-    // panel background over the cover before restoring it, which looks like
-    // flashing.
-    canvas.fillRect(16, 48, ALBUM_ART_WIDTH, ALBUM_ART_HEIGHT,
-                    COLOR_ARTWORK_TRANSPARENT);
-    canvas.pushSprite(0, 0, COLOR_ARTWORK_TRANSPARENT);
-  } else {
-    // A page transition needs one complete opaque frame so no pixels from the
-    // previous page remain behind the new layout.
-    canvas.pushSprite(0, 0);
-  }
-
-  if (showSpotifyArtwork &&
-      (!spotifyArtworkVisibleOnTft || spotifyArtworkNeedsRefresh)) {
-    drawFullColorSpotifyArtwork();
-    spotifyArtworkNeedsRefresh = false;
-  }
-
-  spotifyArtworkVisibleOnTft = showSpotifyArtwork;
+  canvas.pushSprite(0, 0);
   displayDirty = false;
   lastDrawMs = millis();
 }
@@ -632,16 +567,6 @@ void handlePcUpdate() {
   if (webServer.hasArg("source")) {
     mediaSource = limitedText(webServer.arg("source"), 32);
   }
-  bool requestedArtworkMissing = false;
-  if (webServer.hasArg("art")) {
-    const String artworkState = webServer.arg("art");
-    if (artworkState == "clear") {
-      spotifyAlbumArtAvailable = false;
-      spotifyArtworkNeedsRefresh = false;
-    } else if (artworkState == "ready" && !spotifyAlbumArtAvailable) {
-      requestedArtworkMissing = true;
-    }
-  }
 
   mediaPlaying = webServer.hasArg("playing") &&
                  webServer.arg("playing") == "1";
@@ -662,72 +587,6 @@ void handlePcUpdate() {
   lastPcUpdateMs = millis();
   displayDirty = true;
 
-  if (requestedArtworkMissing) {
-    webServer.send(409, "application/json",
-                   "{\"ok\":false,\"error\":\"album art missing\"}");
-  } else {
-    webServer.send(200, "application/json", "{\"ok\":true}");
-  }
-}
-
-void handleAlbumArtUpload() {
-  HTTPUpload &upload = webServer.upload();
-
-  if (upload.status == UPLOAD_FILE_START) {
-    albumArtUploadBytes = 0;
-    albumArtUploadAuthorized =
-        webServer.hasArg("key") && webServer.arg("key") == DISPLAY_API_KEY;
-    albumArtUploadValid = albumArtUploadAuthorized;
-    return;
-  }
-
-  if (upload.status == UPLOAD_FILE_WRITE) {
-    if (!albumArtUploadValid ||
-        albumArtUploadBytes + upload.currentSize > ALBUM_ART_BYTE_COUNT) {
-      albumArtUploadValid = false;
-      return;
-    }
-
-    memcpy(reinterpret_cast<uint8_t *>(spotifyAlbumArt) + albumArtUploadBytes,
-           upload.buf, upload.currentSize);
-    albumArtUploadBytes += upload.currentSize;
-    return;
-  }
-
-  if (upload.status == UPLOAD_FILE_END) {
-    albumArtUploadValid =
-        albumArtUploadValid && albumArtUploadBytes == ALBUM_ART_BYTE_COUNT;
-    if (albumArtUploadValid) {
-      spotifyAlbumArtAvailable = true;
-      spotifyArtworkNeedsRefresh = true;
-      displayDirty = true;
-    }
-    return;
-  }
-
-  if (upload.status == UPLOAD_FILE_ABORTED) {
-    albumArtUploadValid = false;
-  }
-}
-
-void finishAlbumArtUpload() {
-  const bool authorized = albumArtUploadAuthorized;
-  const bool valid = albumArtUploadValid;
-  albumArtUploadAuthorized = false;
-  albumArtUploadValid = false;
-
-  if (!authorized) {
-    webServer.send(403, "application/json",
-                   "{\"ok\":false,\"error\":\"bad key\"}");
-    return;
-  }
-
-  if (!valid) {
-    webServer.send(400, "application/json",
-                   "{\"ok\":false,\"error\":\"album art must be 128x128 RGB565\"}");
-    return;
-  }
-
   webServer.send(200, "application/json", "{\"ok\":true}");
 }
 
@@ -736,8 +595,6 @@ void configureWebServer() {
   webServer.on("/status", HTTP_GET, handleStatusRequest);
   webServer.on("/update", HTTP_POST, handlePcUpdate);
   webServer.on("/update", HTTP_GET, handlePcUpdate);
-  webServer.on("/art", HTTP_POST, finishAlbumArtUpload,
-               handleAlbumArtUpload);
   webServer.onNotFound([]() {
     webServer.send(404, "application/json", "{\"ok\":false,\"error\":\"not found\"}");
   });
@@ -884,7 +741,7 @@ void loop() {
     displayDirty = true;
   }
 
-  const bool progressNeedsUpdate = pcOnline && mediaPlaying;
+  const bool progressNeedsUpdate = shouldShowMediaTimeline();
   if ((displayDirty || progressNeedsUpdate) &&
       now - lastDrawMs >= DRAW_INTERVAL_MS) {
     drawDisplay();
