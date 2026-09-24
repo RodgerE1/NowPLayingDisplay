@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,9 @@ LOG_FILE = PROJECT_FOLDER / "pc_sender.log"
 MUTEX_NAME = "Local\\ESP32RoomPCDisplayTray_Rodger"
 ERROR_ALREADY_EXISTS = 183
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+AUTO_RESTART_DELAY_SECONDS = 2.0
+AUTO_RESTART_LIMIT = 5
+AUTO_RESTART_WINDOW_SECONDS = 300.0
 
 _mutex_handle: int | None = None
 _sender_process: subprocess.Popen[Any] | None = None
@@ -242,6 +246,7 @@ def stop_and_exit(icon: Any, _item: Any = None) -> None:
 
 def monitor_sender() -> None:
     previous_running = sender_is_running()
+    automatic_restarts: deque[float] = deque()
 
     while not _shutdown_event.wait(1.0):
         running = sender_is_running()
@@ -250,14 +255,47 @@ def monitor_sender() -> None:
 
         update_tray_status()
         if previous_running and not running and _tray_icon is not None:
+            now = time.monotonic()
+            while (
+                automatic_restarts
+                and now - automatic_restarts[0]
+                > AUTO_RESTART_WINDOW_SECONDS
+            ):
+                automatic_restarts.popleft()
+
+            restart_allowed = len(automatic_restarts) < AUTO_RESTART_LIMIT
             try:
                 _tray_icon.notify(
-                    "The display sender stopped. Right-click the tray icon "
-                    "to start it again.",
+                    "The display sender stopped unexpectedly. "
+                    + (
+                        "Restarting it automatically."
+                        if restart_allowed
+                        else "It stopped repeatedly; open the log before "
+                        "starting it again."
+                    ),
                     "ESP32 Room + PC Display",
                 )
             except (AttributeError, NotImplementedError, RuntimeError):
                 pass
+
+            if restart_allowed:
+                if _shutdown_event.wait(AUTO_RESTART_DELAY_SECONDS):
+                    break
+                if start_sender():
+                    automatic_restarts.append(time.monotonic())
+                    running = True
+                    if _tray_icon is not None:
+                        try:
+                            _tray_icon.notify(
+                                "The display sender was restarted automatically.",
+                                "ESP32 Room + PC Display",
+                            )
+                        except (
+                            AttributeError,
+                            NotImplementedError,
+                            RuntimeError,
+                        ):
+                            pass
         previous_running = running
 
 

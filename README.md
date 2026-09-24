@@ -87,6 +87,8 @@ Right-click the tray icon for:
 - **Restart sender** (or **Start sender** if it stopped)
 - **Stop and exit** — stops the sender and removes the tray icon
 
+If the sender process exits unexpectedly, the tray controller restarts it automatically after two seconds. It stops trying after five unexpected exits within five minutes so a persistent fault cannot create an endless restart loop; use **View log** before starting it again.
+
 The older `2_RUN_PC_SENDER_HIDDEN.vbs` remains for existing shortcuts, but it now opens this same tray controller instead of launching an invisible sender.
 
 Important events and connection problems are written to `pc_sender.log`. The log has a hard ceiling of 1,000 entries. When it passes that ceiling, the oldest entries are deleted and the newest 800 are retained. Old numbered backup logs from earlier versions are removed automatically.
@@ -110,7 +112,9 @@ Duplicate tray and sender instances are blocked automatically. Use the visible l
 - PC readings turn to `--` after 15 seconds without updates; while disconnected, the header shows the display's local IP for easy reconnection.
 - Media information comes from the Windows system media session. Opera GX, YouTube, Spotify, VLC, Edge, Chrome, and similar apps generally appear when they publish media metadata to Windows.
 - When the active session is the Spotify desktop app, its album art replaces the music-note tile. Other players keep the original tile. Artwork is read from Windows and sent only across your local network; no Spotify login or Web API credentials are used.
+- Rapidly skipped Spotify tracks do not trigger back-to-back artwork transfers. A track must be present in two consecutive media reads before its cover is sent, and a failed cover transfer waits eight seconds before another attempt. Normal sensor and media updates continue during this process.
 - Display updates use a five-second timeout and retry once before counting a failed cycle. Automatic discovery runs again only after six consecutive failed cycles.
+- Unexpected Python-level sender errors are written to the log and recover automatically after three seconds. If the entire process exits, the tray controller provides a second recovery layer by starting it again.
 - If you installed an earlier version of the companion, run `1_INSTALL_PC_SENDER.bat` again once so the artwork and system-tray dependencies are added.
 - Long titles are shortened or wrapped to fit the 320 × 240 screen.
 - No data is sent beyond the local network by this project.

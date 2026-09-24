@@ -37,15 +37,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-try:
-    from pc_secrets import DISPLAY_API_KEY
-except ImportError as exc:
-    raise SystemExit(
-        "Missing pc_secrets.py. Copy pc_secrets.example.py to "
-        "pc_secrets.py, then put the same DISPLAY_API_KEY in it that you "
-        "used in secrets.h."
-    ) from exc
-
 
 # --------------------------- User settings ---------------------------
 
@@ -53,10 +44,14 @@ except ImportError as exc:
 # the IP shown on the ESP32 here, for example: "192.168.1.123"
 DISPLAY_IP = ""
 
+from pc_secrets import DISPLAY_API_KEY
 SEND_INTERVAL_SECONDS = 2.0
 UPDATE_TIMEOUT_SECONDS = 5.0
 UPDATE_RETRY_DELAY_SECONDS = 0.35
 REDISCOVERY_FAILURE_THRESHOLD = 6
+ARTWORK_STABLE_OBSERVATIONS = 2
+ARTWORK_RETRY_COOLDOWN_SECONDS = 8.0
+UNEXPECTED_RESTART_DELAY_SECONDS = 3.0
 
 # Leave this blank to automatically try localhost and every active local IPv4
 # address. If automatic detection ever fails, enter the address shown in
@@ -258,6 +253,31 @@ class MediaState:
     album: str = ""
     is_spotify: bool = False
     thumbnail: Any = None
+
+
+@dataclass
+class ArtworkStability:
+    """Require the same track twice before transferring its large artwork."""
+
+    candidate_key: str = ""
+    observations: int = 0
+
+    def reset(self) -> None:
+        self.candidate_key = ""
+        self.observations = 0
+
+    def observe(self, candidate_key: str) -> bool:
+        if not candidate_key:
+            self.reset()
+            return False
+
+        if candidate_key != self.candidate_key:
+            self.candidate_key = candidate_key
+            self.observations = 1
+            return False
+
+        self.observations += 1
+        return self.observations >= ARTWORK_STABLE_OBSERVATIONS
 
 
 @dataclass
@@ -681,14 +701,19 @@ async def read_thumbnail_bytes(thumbnail: Any) -> bytes | None:
         )
         image_bytes = bytes(memoryview(result))
         return image_bytes or bytes(destination)
-    except (OSError, RuntimeError, TypeError, ValueError):
+    except Exception as exc:
+        LOGGER.warning(
+            "Spotify thumbnail read failed (%s): %s",
+            type(exc).__name__,
+            exc,
+        )
         return None
     finally:
         if stream is not None:
             try:
                 stream.close()
-            except (AttributeError, OSError):
-                pass
+            except Exception:
+                LOGGER.debug("Spotify thumbnail stream did not close cleanly.")
 
 
 def thumbnail_to_rgb565(image_bytes: bytes) -> bytes:
@@ -808,7 +833,7 @@ def send_update_with_retry(
     try:
         send_update(url, hardware, media, album_art_ready)
         return
-    except (OSError, RuntimeError, urllib.error.URLError) as first_error:
+    except Exception as first_error:
         LOGGER.warning("Update attempt failed; retrying once: %s", first_error)
 
     time.sleep(UPDATE_RETRY_DELAY_SECONDS)
@@ -854,6 +879,8 @@ async def main() -> int:
     last_cpu_warning = 0.0
     active_art_key = ""
     album_art_ready = False
+    artwork_stability = ArtworkStability()
+    last_art_attempt_at = 0.0
 
     while True:
         cycle_started = time.monotonic()
@@ -887,23 +914,40 @@ async def main() -> int:
         if not wanted_art_key:
             active_art_key = ""
             album_art_ready = False
+            artwork_stability.reset()
+        elif wanted_art_key == active_art_key:
+            album_art_ready = True
+            artwork_stability.reset()
         elif wanted_art_key != active_art_key:
             album_art_ready = False
-            thumbnail_bytes = await read_thumbnail_bytes(media.thumbnail)
-            if thumbnail_bytes and Image is not None:
+            artwork_is_stable = artwork_stability.observe(wanted_art_key)
+            cooldown_finished = (
+                time.monotonic() - last_art_attempt_at
+                >= ARTWORK_RETRY_COOLDOWN_SECONDS
+            )
+            if artwork_is_stable and cooldown_finished:
+                last_art_attempt_at = time.monotonic()
                 try:
-                    artwork = await asyncio.to_thread(
-                        thumbnail_to_rgb565, thumbnail_bytes
+                    thumbnail_bytes = await read_thumbnail_bytes(media.thumbnail)
+                    if thumbnail_bytes and Image is not None:
+                        artwork = await asyncio.to_thread(
+                            thumbnail_to_rgb565, thumbnail_bytes
+                        )
+                        await asyncio.to_thread(
+                            send_album_art, display_url, artwork
+                        )
+                        active_art_key = wanted_art_key
+                        album_art_ready = True
+                        artwork_stability.reset()
+                        LOGGER.info(
+                            "Loaded Spotify artwork for: %s", media.title[:55]
+                        )
+                except Exception as exc:
+                    LOGGER.warning(
+                        "Spotify artwork unavailable (%s): %s",
+                        type(exc).__name__,
+                        exc,
                     )
-                    await asyncio.to_thread(send_album_art, display_url, artwork)
-                    active_art_key = wanted_art_key
-                    album_art_ready = True
-                    LOGGER.info(
-                        "Loaded Spotify artwork for: %s", media.title[:55]
-                    )
-                except (OSError, RuntimeError, ValueError,
-                        urllib.error.URLError) as exc:
-                    LOGGER.warning("Spotify artwork unavailable: %s", exc)
 
         if (
             hardware.cpu_temperature_c is None
@@ -930,14 +974,16 @@ async def main() -> int:
                 f"GPU {temperature_text(hardware.gpu_temperature_c):>5} | "
                 f"{state:<11} | {media.title[:55]}"
             )
-        except (OSError, RuntimeError, urllib.error.URLError) as exc:
+        except Exception as exc:
             consecutive_failures += 1
             active_art_key = ""
             album_art_ready = False
+            artwork_stability.reset()
             LOGGER.warning(
-                "Send failed after retry (%d/%d): %s",
+                "Send failed after retry (%d/%d, %s): %s",
                 consecutive_failures,
                 REDISCOVERY_FAILURE_THRESHOLD,
+                type(exc).__name__,
                 exc,
             )
             if (
@@ -956,6 +1002,24 @@ async def main() -> int:
         await asyncio.sleep(max(0.1, SEND_INTERVAL_SECONDS - elapsed))
 
 
+def run_sender_with_recovery() -> int:
+    """Restart the async sender after an unexpected Python-level failure."""
+    while True:
+        try:
+            return asyncio.run(main())
+        except KeyboardInterrupt:
+            LOGGER.info("Stopped.")
+            return 0
+        except Exception:
+            configure_logging()
+            LOGGER.exception(
+                "Unexpected sender failure; restarting automatically in "
+                "%.0f seconds.",
+                UNEXPECTED_RESTART_DELAY_SECONDS,
+            )
+            time.sleep(UNEXPECTED_RESTART_DELAY_SECONDS)
+
+
 if __name__ == "__main__":
     if not acquire_sender_instance():
         configure_logging()
@@ -965,9 +1029,6 @@ if __name__ == "__main__":
         raise SystemExit(0)
 
     try:
-        raise SystemExit(asyncio.run(main()))
-    except KeyboardInterrupt:
-        LOGGER.info("Stopped.")
-        raise SystemExit(0)
+        raise SystemExit(run_sender_with_recovery())
     finally:
         release_sender_instance()
