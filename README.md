@@ -1,164 +1,114 @@
-Now Playing Display
-This project allows you to display "Now Playing" information from your Windows PC on an ESP32-driven LCD, and also outputs the data to a JSON file. It's designed for users who want a physical display for their currently playing media.
+# ESP32 Room + PC Display
 
-It consists of two main parts:
+This project turns the ESP32-2432S028R into a local dashboard showing:
 
-now_playing_sender.py (Python Script for Windows PC): This script runs on your Windows 11 PC, polls the system for media playback information, and sends it via serial to an ESP32. It also writes the current media information to a JSON file.
+- the exact LibreHardwareMonitor **CPU Package** temperature
+- NVIDIA GPU temperature
+- DHT22/AM2302 room temperature and humidity
+- the three useful motherboard fan speeds: F2, F6, and F7
+- the composite temperature of up to three SSDs
+- the current Windows media title, including compatible browser/YouTube sessions
+- Spotify album art when Spotify supplies it to Windows, drawn directly to the
+  TFT in full 16-bit RGB565 color
+- media source, play/pause state, and progress
 
-ESP32 Arduino Sketch (for ESP32 Microcontroller): This sketch runs on an ESP32 board connected to an I2C LCD (e.g., 16x2). It receives serial data from the PC script and displays the title, artist, and playback status. The backlight of the LCD is controlled by the playback status.
+It does **not** use touch and it does **not** log or upload readings to an external site. The Windows companion keeps only a small rotating diagnostic log locally beside the script.
 
-Features
-Real-time Updates: Displays current song title, artist, and playback status.
+## Part 1 — upload the ESP32 sketch
 
-Serial Communication: Sends data from PC to ESP32 via a USB-to-serial connection.
+1. Keep every file in this folder together.
+2. Copy `secrets.example.h` to a new file named `secrets.h`.
+3. Edit `secrets.h`: enter your Wi-Fi name and password, then replace the
+   example `DISPLAY_API_KEY` with a private value of your choice.
+4. Open `Room_PC_Display.ino` in Arduino IDE.
+5. Select **Tools > Board > ESP32 Arduino > ESP32 Dev Module**.
+6. Select the ESP32's COM port.
+7. Upload the sketch.
 
-JSON Output: Saves media information to a local JSON file for other applications to use.
+`secrets.h` is intentionally ignored by Git so Wi-Fi credentials cannot be
+committed accidentally.
 
-System Tray Integration: Runs in the Windows system tray with a tooltip showing status.
+The display should immediately show the monitoring page and begin connecting to Wi-Fi. The DHT22 reading appears after its first valid measurement. Until the Windows program connects, the header shows the ESP32's local IP address.
 
-Single Instance: Ensures only one instance of the Python script runs at a time.
+The sketch requires:
 
-Dynamic Backlight: ESP32 sketch controls LCD backlight based on playback status (ON when playing, OFF when paused/stopped).
+- **DHT sensor library** by Adafruit
+- **Adafruit Unified Sensor**
+- **TFT_eSPI** by Bodmer
 
-Line Wrapping: ESP32 sketch intelligently wraps long titles/artists across two lines on a 16x2 LCD.
+Your TFT_eSPI setup is already confirmed working by the image test. Do not replace it unless the screen becomes white after a library reinstall/update. `TFT_eSPI_User_Setup_CYD.h` is included as a backup and follows the supplied Random Nerd Tutorials configuration.
 
-Requirements
-PC (Windows 11)
-Python 3.x
+## Part 2 — prepare CPU-temperature monitoring
 
-pyserial
+GPU temperature comes directly from NVIDIA's `nvidia-smi`. The exact **CPU Package** sensor, system fans, and SSD composite temperatures come from LibreHardwareMonitor.
 
-pystray
+1. Download LibreHardwareMonitor from its official GitHub releases page:
+   <https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases>
+2. Extract and run `LibreHardwareMonitor.exe`.
+3. Open **Options > Remote Web Server > Set Port** and leave the displayed network interface selected. It might show your PC's LAN address, such as `10.0.0.64`, instead of `127.0.0.1`; that is correct.
+4. Enable **Options > Remote Web Server > Run**.
+5. Leave LibreHardwareMonitor running. It may need **Run as administrator** for all motherboard, fan, CPU, and storage sensors to appear.
 
-Pillow (PIL)
+Test the blue address shown in LibreHardwareMonitor's Set Port window, adding `data.json` at the end. For example: `http://10.0.0.64:8085/data.json`. The companion automatically tries localhost and the PC's active local IPv4 addresses.
 
-winsdk
+## Part 3 — run the Windows companion
 
-ESP32
-ESP32 development board (e.g., ESP32 DevKitC)
+1. Copy `pc_secrets.example.py` to a new file named `pc_secrets.py`.
+2. Edit `pc_secrets.py` and enter the exact same `DISPLAY_API_KEY` used in
+   `secrets.h`.
+3. Double-click `1_INSTALL_PC_SENDER.bat` once.
+4. When installation finishes, double-click `2_RUN_PC_SENDER.bat`.
+5. If Windows Firewall asks, allow Python on **Private networks** so automatic ESP32 discovery can work.
 
-16x2 I2C LCD display
+`pc_secrets.py` is also ignored by Git.
 
-Arduino IDE
+The console prints each update as it is sent. The ESP32 normally discovers automatically. If discovery fails:
 
-LiquidCrystal_I2C library for Arduino
+1. Read the IP address shown on the ESP32 screen.
+2. Open `pc_sender.py` in Notepad.
+3. Change `DISPLAY_IP = ""` near the top to that address, for example:
 
-Wire library (usually built-in)
+   ```python
+   DISPLAY_IP = "192.168.1.123"
+   ```
 
-USB cable for serial connection between PC and ESP32
+4. Save the file and run `2_RUN_PC_SENDER.bat` again.
 
-Setup Instructions
-1. PC Setup (now_playing_sender.py)
-Clone the Repository:
-If you haven't already, clone this repository to your local machine:
+### Run without a command window
 
-git clone https://github.com/RodgerE1/NowPLayingDisplay.git
-cd NowPLayingDisplay
+After the one-time installation, double-click `2_RUN_PC_SENDER_HIDDEN.vbs` to run the companion completely in the background. Do not run the normal and hidden launchers at the same time.
 
-Install Python Dependencies:
-It's recommended to use a Python virtual environment.
+Important events and connection problems are written to `pc_sender.log`. It rotates automatically at 256 KB and keeps two backups, so it cannot grow without limit. Use the normal BAT launcher whenever you want to watch every two-second update live.
 
-python -m venv venv
-.\venv\Scripts\activate   # On Windows
-# source venv/bin/activate # On macOS/Linux
-pip install pyserial pystray Pillow winsdk
+To start the hidden launcher automatically with Windows:
 
-Configure the Python Script:
-Open now_playing_sender.py in a text editor.
+1. Press **Win+R** and enter `shell:startup`.
+2. Create a shortcut in that folder pointing to `2_RUN_PC_SENDER_HIDDEN.vbs`.
 
-Adjust ESP32_PORT: Change 'COM4' to the COM port assigned to your ESP32 when connected to your PC. You can find this in Windows Device Manager under "Ports (COM & LPT)".
+## Expected behavior
 
-Adjust JSON_FILENAME: If you want the JSON output file in a different location, change r"e:\now_playing_sender.json".
-
-Run the Python Script:
-
-python now_playing_sender.py
-
-The script will run in the background and appear as an icon in your system tray.
-
-2. ESP32 Setup (Arduino Sketch)
-Install Arduino IDE:
-Download and install the Arduino IDE.
-
-Add ESP32 Board Support:
-
-Go to File > Preferences in Arduino IDE.
-
-In "Additional Boards Manager URLs", add:
-https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
-
-Go to Tools > Board > Boards Manager....
-
-Search for "esp32" and install the "ESP32 by Espressif Systems" package.
-
-Select your specific ESP32 board from Tools > Board.
-
-Install LiquidCrystal_I2C Library:
-
-Go to Sketch > Include Library > Manage Libraries....
-
-Search for "LiquidCrystal I2C" and install the library by Frank de Brabander.
-
-Wire the LCD to ESP32:
-Connect your I2C LCD to the ESP32. Standard I2C pins for ESP32 are:
-
-SDA: GPIO 21
-
-SCL: GPIO 22
-
-VCC: 3.3V or 5V (depending on your LCD module's requirements)
-
-GND: GND
-
-The sketch uses GPIO 18 for the backlight control. You'll need to connect a digital pin (e.g., GPIO 18) from your ESP32 to the backlight control pin of your I2C LCD module (if it has one, often labeled LED+ or similar, usually through a transistor or directly if it's a simple on/off). If your I2C module handles backlight internally, you might not need the BACKLIGHT_PIN and digitalWrite calls, but the code is set up to use it.
-
-Upload the Arduino Sketch:
-
-Copy the provided Arduino sketch code into a new sketch in the Arduino IDE.
-
-Verify the LCD_ADDR (0x27 or 0x3F are common) matches your LCD's I2C address. You might need an I2C scanner sketch to find the correct address if 0x27 doesn't work.
-
-Select the correct COM port for your ESP32 under Tools > Port.
-
-Click the "Upload" button.
-
-Usage
-Ensure both the Python script is running on your PC and the Arduino sketch is uploaded to your ESP32.
-
-Play media on your Windows PC (e.g., Spotify, YouTube, Windows Media Player).
-
-The "Now Playing" information should appear on your LCD, and the backlight will turn on when media is actively playing (status 4).
-
-The now_playing_sender.json file will be updated with the full media information.
-
-Troubleshooting
-Python Script not starting: Check your Python installation and ensure all dependencies are installed.
-
-"Another instance is already running": The script is designed to run as a single instance. If you see this, check your task manager for pythonw.exe or python.exe processes and terminate any existing now_playing_sender.py instances.
-
-Serial Port Errors:
-
-Verify the ESP32_PORT in now_playing_sender.py is correct.
-
-Ensure the ESP32 is connected and its drivers are installed.
-
-Make sure no other application is using the COM port.
-
-LCD not displaying:
-
-Check your wiring connections (SDA, SCL, VCC, GND).
-
-Verify the LCD_ADDR in the Arduino sketch is correct for your LCD.
-
-Ensure the LiquidCrystal_I2C library is installed.
-
-Check the serial monitor in Arduino IDE for any error messages from the ESP32.
-
-Backlight not working:
-
-Ensure BACKLIGHT_PIN (GPIO 18) is correctly connected to your LCD's backlight control.
-
-Verify your LCD module supports backlight control via a digital pin.
-
-Contributing
-Feel free to open issues or submit pull requests if you have suggestions or improvements!
+- When nothing is actively playing—or media is paused—the ESP32 shows the System Monitor page.
+- When Windows reports that media is actively playing, the ESP32 automatically switches to the full-screen Now Playing page. Stopping or pausing returns it to System Monitor.
+- The Now Playing page uses the full content area for 128×128 artwork, title, artist, source, progress bar, elapsed time, and duration. Sensor cards are not shown on this page. The interface remains memory-efficient at 8-bit, while Spotify artwork is layered directly onto the TFT in 16-bit RGB565 so it is not reduced to the interface palette.
+- The System Monitor page shows CPU Package, GPU, room temperature/humidity, F2, F6, F7, and up to three SSD composite temperatures. Permanently stopped F1, F3, F4, F5, GPU1, and GPU2 readings are hidden.
+- A missing displayed fan sensor shows `--`.
+- Room temperature and humidity continue working even when the PC is off.
+- PC readings turn to `--` after 15 seconds without updates; while disconnected, the header shows the display's local IP for easy reconnection.
+- Media information comes from the Windows system media session. Opera GX, YouTube, Spotify, VLC, Edge, Chrome, and similar apps generally appear when they publish media metadata to Windows.
+- When the active session is the Spotify desktop app, its album art replaces the music-note tile. Other players keep the original tile. Artwork is read from Windows and sent only across your local network; no Spotify login or Web API credentials are used.
+- Display updates use a five-second timeout and retry once before counting a failed cycle. Automatic discovery runs again only after six consecutive failed cycles.
+- If you installed an earlier version of the companion, run `1_INSTALL_PC_SENDER.bat` again once so the artwork dependencies are added.
+- Long titles are shortened or wrapped to fit the 320 × 240 screen.
+- No data is sent beyond the local network by this project.
+
+## Hardware and display configuration
+
+- Board: ESP32-2432S028R / 2.8-inch CYD
+- Arduino board selection: ESP32 Dev Module
+- Display rotation: landscape, rotation 1
+- Backlight: GPIO 21, active HIGH
+- DHT22/AM2302 data: GPIO 27
+- Touch: unused
+
+Reference supplied for this device:
+<https://randomnerdtutorials.com/cheap-yellow-display-esp32-2432s028r/>
