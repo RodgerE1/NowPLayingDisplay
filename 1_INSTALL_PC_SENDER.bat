@@ -24,7 +24,7 @@ if errorlevel 1 goto :failed
 echo.
 echo Installation complete.
 echo Run 2_RUN_PC_SENDER.bat for the visible console.
-echo Run 2_RUN_PC_SENDER_HIDDEN.vbs to run in the background.
+echo Run 2_RUN_PC_SENDER_TRAY.bat for the system-tray version.
 pause
 exit /b 0
 

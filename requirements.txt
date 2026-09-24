@@ -5,3 +5,4 @@ winrt-Windows.Media==3.2.1
 winrt-Windows.Media.Control==3.2.1
 winrt-Windows.Storage.Streams==3.2.1
 Pillow==11.3.0
+pystray==0.19.5

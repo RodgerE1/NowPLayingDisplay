@@ -17,6 +17,7 @@ between this PC and the ESP32 on the local network.
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import html
 import io
 import json
@@ -31,8 +32,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
@@ -99,24 +100,139 @@ SYSTEM_FAN_COUNT = 7
 GPU_FAN_COUNT = 2
 STORAGE_TEMPERATURE_COUNT = 3
 LOG_FILE = Path(__file__).resolve().with_name("pc_sender.log")
+LOG_MAX_ENTRIES = 1000
+LOG_RETAIN_ENTRIES = 800
+SENDER_MUTEX_NAME = "Local\\ESP32RoomPCDisplaySender_Rodger"
+ERROR_ALREADY_EXISTS = 183
 
 
 LOGGER = logging.getLogger("room_pc_display")
+_sender_mutex_handle: int | None = None
+
+
+def acquire_sender_instance() -> bool:
+    """Allow only one copy of pc_sender.py in this Windows session."""
+    global _sender_mutex_handle
+
+    if sys.platform != "win32":
+        return True
+
+    kernel32 = ctypes.windll.kernel32
+    create_mutex = kernel32.CreateMutexW
+    create_mutex.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+    create_mutex.restype = ctypes.c_void_p
+
+    handle = create_mutex(None, False, SENDER_MUTEX_NAME)
+    if not handle:
+        return False
+
+    if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+        kernel32.CloseHandle(handle)
+        return False
+
+    _sender_mutex_handle = int(handle)
+    return True
+
+
+def release_sender_instance() -> None:
+    global _sender_mutex_handle
+
+    if sys.platform == "win32" and _sender_mutex_handle is not None:
+        ctypes.windll.kernel32.CloseHandle(
+            ctypes.c_void_p(_sender_mutex_handle)
+        )
+    _sender_mutex_handle = None
+
+
+class EntryCappedFileHandler(logging.FileHandler):
+    """Keep one log file containing only a bounded number of recent entries."""
+
+    def __init__(
+        self,
+        filename: Path,
+        max_entries: int,
+        retain_entries: int,
+    ) -> None:
+        self.log_path = Path(filename)
+        self.max_entries = max(1, int(max_entries))
+        self.retain_entries = max(
+            1, min(int(retain_entries), self.max_entries)
+        )
+        self.entry_count = self._prune_existing_log()
+        super().__init__(self.log_path, mode="a", encoding="utf-8")
+
+    def _recent_lines(self) -> tuple[int, deque[str]]:
+        recent: deque[str] = deque(maxlen=self.retain_entries)
+        total = 0
+
+        if not self.log_path.exists():
+            return total, recent
+
+        with self.log_path.open(
+            "r", encoding="utf-8", errors="replace"
+        ) as source:
+            for line in source:
+                total += 1
+                recent.append(line)
+
+        return total, recent
+
+    def _rewrite_recent_lines(self, recent: deque[str]) -> int:
+        with self.log_path.open("w", encoding="utf-8", newline="") as output:
+            output.writelines(recent)
+        return len(recent)
+
+    def _prune_existing_log(self) -> int:
+        try:
+            total, recent = self._recent_lines()
+            if total > self.max_entries:
+                return self._rewrite_recent_lines(recent)
+            return total
+        except OSError:
+            # Logging must never stop the sensor sender from running.
+            return 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        super().emit(record)
+        self.entry_count += 1
+
+        if self.entry_count <= self.max_entries:
+            return
+
+        try:
+            self.flush()
+            if self.stream is not None:
+                self.stream.close()
+                self.stream = None
+
+            _, recent = self._recent_lines()
+            self.entry_count = self._rewrite_recent_lines(recent)
+        except OSError:
+            self.handleError(record)
+        finally:
+            if self.stream is None:
+                self.stream = self._open()
 
 
 def configure_logging() -> None:
-    """Log important events to a small rotating file and details to console."""
+    """Log important events while retaining only the newest entries."""
     if LOGGER.handlers:
         return
 
     LOGGER.setLevel(logging.DEBUG)
     LOGGER.propagate = False
 
-    file_handler = RotatingFileHandler(
+    # Remove backup files created by versions that rotated logs by byte size.
+    for legacy_backup in ("pc_sender.log.1", "pc_sender.log.2"):
+        try:
+            LOG_FILE.with_name(legacy_backup).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    file_handler = EntryCappedFileHandler(
         LOG_FILE,
-        maxBytes=256 * 1024,
-        backupCount=2,
-        encoding="utf-8",
+        max_entries=LOG_MAX_ENTRIES,
+        retain_entries=LOG_RETAIN_ENTRIES,
     )
     file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(
@@ -709,6 +825,10 @@ async def main() -> int:
     LOGGER.info("ESP32 Room + PC Display companion")
     LOGGER.info("Press Ctrl+C to stop.")
     LOGGER.info("Log file: %s", LOG_FILE)
+    LOGGER.info(
+        "Log limit: %d entries; oldest entries are pruned automatically.",
+        LOG_MAX_ENTRIES,
+    )
 
     if MediaManager is None:
         LOGGER.warning("Windows media package is missing.")
@@ -837,8 +957,17 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
+    if not acquire_sender_instance():
+        configure_logging()
+        LOGGER.warning(
+            "Another copy of the ESP32 display sender is already running."
+        )
+        raise SystemExit(0)
+
     try:
         raise SystemExit(asyncio.run(main()))
     except KeyboardInterrupt:
         LOGGER.info("Stopped.")
         raise SystemExit(0)
+    finally:
+        release_sender_instance()

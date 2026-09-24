@@ -1,5 +1,7 @@
 # ESP32 Room + PC Display
 
+![ESP32 room and PC system monitor](docs/system-monitor.jpg)
+
 This project turns the ESP32-2432S028R into a local dashboard showing:
 
 - the exact LibreHardwareMonitor **CPU Package** temperature
@@ -12,7 +14,7 @@ This project turns the ESP32-2432S028R into a local dashboard showing:
   TFT in full 16-bit RGB565 color
 - media source, play/pause state, and progress
 
-It does **not** use touch and it does **not** log or upload readings to an external site. The Windows companion keeps only a small rotating diagnostic log locally beside the script.
+It does **not** use touch and it does **not** log or upload readings to an external site. The Windows companion keeps only a small, entry-limited diagnostic log locally beside the script.
 
 ## Part 1 — upload the ESP32 sketch
 
@@ -57,12 +59,12 @@ Test the blue address shown in LibreHardwareMonitor's Set Port window, adding `d
 2. Edit `pc_secrets.py` and enter the exact same `DISPLAY_API_KEY` used in
    `secrets.h`.
 3. Double-click `1_INSTALL_PC_SENDER.bat` once.
-4. When installation finishes, double-click `2_RUN_PC_SENDER.bat`.
+4. For normal use, double-click `2_RUN_PC_SENDER_TRAY.bat`. Use `2_RUN_PC_SENDER.bat` when you want the visible diagnostic console.
 5. If Windows Firewall asks, allow Python on **Private networks** so automatic ESP32 discovery can work.
 
 `pc_secrets.py` is also ignored by Git.
 
-The console prints each update as it is sent. The ESP32 normally discovers automatically. If discovery fails:
+The visible diagnostic console prints each update as it is sent. The ESP32 normally discovers automatically. If discovery fails:
 
 1. Read the IP address shown on the ESP32 screen.
 2. Open `pc_sender.py` in Notepad.
@@ -72,24 +74,36 @@ The console prints each update as it is sent. The ESP32 normally discovers autom
    DISPLAY_IP = "192.168.1.123"
    ```
 
-4. Save the file and run `2_RUN_PC_SENDER.bat` again.
+4. Save the file and restart the sender from the tray menu, or run `2_RUN_PC_SENDER.bat` again.
 
-### Run without a command window
+### Recommended: run from the Windows system tray
 
-After the one-time installation, double-click `2_RUN_PC_SENDER_HIDDEN.vbs` to run the companion completely in the background. Do not run the normal and hidden launchers at the same time.
+After the one-time installation, double-click `2_RUN_PC_SENDER_TRAY.bat`. Its command window closes immediately, and a small monitor icon appears in the Windows notification area. You may need to click the notification-area arrow to see it.
 
-Important events and connection problems are written to `pc_sender.log`. It rotates automatically at 256 KB and keeps two backups, so it cannot grow without limit. Use the normal BAT launcher whenever you want to watch every two-second update live.
+Right-click the tray icon for:
 
-To start the hidden launcher automatically with Windows:
+- **View log** — opens `pc_sender.log` in Notepad
+- **Open project folder**
+- **Restart sender** (or **Start sender** if it stopped)
+- **Stop and exit** — stops the sender and removes the tray icon
+
+The older `2_RUN_PC_SENDER_HIDDEN.vbs` remains for existing shortcuts, but it now opens this same tray controller instead of launching an invisible sender.
+
+Important events and connection problems are written to `pc_sender.log`. The log has a hard ceiling of 1,000 entries. When it passes that ceiling, the oldest entries are deleted and the newest 800 are retained. Old numbered backup logs from earlier versions are removed automatically.
+
+To start the tray controller automatically with Windows:
 
 1. Press **Win+R** and enter `shell:startup`.
-2. Create a shortcut in that folder pointing to `2_RUN_PC_SENDER_HIDDEN.vbs`.
+2. Create a shortcut in that folder pointing to `2_RUN_PC_SENDER_TRAY.bat`.
+
+Duplicate tray and sender instances are blocked automatically. Use the visible launcher only after choosing **Stop and exit** from the tray menu.
 
 ## Expected behavior
 
 - When nothing is actively playing—or media is paused—the ESP32 shows the System Monitor page.
 - When Windows reports that media is actively playing, the ESP32 automatically switches to the full-screen Now Playing page. Stopping or pausing returns it to System Monitor.
 - The Now Playing page uses the full content area for 128×128 artwork, title, artist, source, progress bar, elapsed time, and duration. Sensor cards are not shown on this page. The interface remains memory-efficient at 8-bit, while Spotify artwork is layered directly onto the TFT in 16-bit RGB565 so it is not reduced to the interface palette.
+- Once displayed, album artwork remains untouched during the once-per-second progress and time refresh. Only the surrounding UI is updated, preventing the cover from flashing between frames.
 - The System Monitor page shows CPU Package, GPU, room temperature/humidity, F2, F6, F7, and up to three SSD composite temperatures. Permanently stopped F1, F3, F4, F5, GPU1, and GPU2 readings are hidden.
 - A missing displayed fan sensor shows `--`.
 - Room temperature and humidity continue working even when the PC is off.
@@ -97,7 +111,7 @@ To start the hidden launcher automatically with Windows:
 - Media information comes from the Windows system media session. Opera GX, YouTube, Spotify, VLC, Edge, Chrome, and similar apps generally appear when they publish media metadata to Windows.
 - When the active session is the Spotify desktop app, its album art replaces the music-note tile. Other players keep the original tile. Artwork is read from Windows and sent only across your local network; no Spotify login or Web API credentials are used.
 - Display updates use a five-second timeout and retry once before counting a failed cycle. Automatic discovery runs again only after six consecutive failed cycles.
-- If you installed an earlier version of the companion, run `1_INSTALL_PC_SENDER.bat` again once so the artwork dependencies are added.
+- If you installed an earlier version of the companion, run `1_INSTALL_PC_SENDER.bat` again once so the artwork and system-tray dependencies are added.
 - Long titles are shortened or wrapped to fit the 320 × 240 screen.
 - No data is sent beyond the local network by this project.
 

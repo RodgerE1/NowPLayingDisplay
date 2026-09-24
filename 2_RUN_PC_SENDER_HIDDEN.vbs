@@ -13,7 +13,7 @@ Set shell = CreateObject("WScript.Shell")
 projectFolder = fileSystem.GetParentFolderName(WScript.ScriptFullName)
 pythonExecutable = fileSystem.BuildPath( _
     projectFolder, ".venv\Scripts\pythonw.exe")
-senderScript = fileSystem.BuildPath(projectFolder, "pc_sender.py")
+senderScript = fileSystem.BuildPath(projectFolder, "tray_sender.py")
 
 If Not fileSystem.FileExists(pythonExecutable) Then
     MsgBox "Python environment not found." & vbCrLf & _
@@ -23,7 +23,7 @@ If Not fileSystem.FileExists(pythonExecutable) Then
 End If
 
 If Not fileSystem.FileExists(senderScript) Then
-    MsgBox "pc_sender.py was not found.", _
+    MsgBox "tray_sender.py was not found.", _
            16, "ESP32 PC Sender"
     WScript.Quit 1
 End If

@@ -105,6 +105,8 @@ size_t albumArtUploadBytes = 0;
 bool albumArtUploadAuthorized = false;
 bool albumArtUploadValid = false;
 bool spotifyAlbumArtAvailable = false;
+bool spotifyArtworkVisibleOnTft = false;
+bool spotifyArtworkNeedsRefresh = false;
 
 bool displayDirty = true;
 
@@ -125,6 +127,9 @@ constexpr uint16_t COLOR_AMBER = rgb565(255, 193, 90);
 constexpr uint16_t COLOR_TILE_BLUE = rgb565(31, 78, 112);
 constexpr uint16_t COLOR_TILE_PURPLE = rgb565(111, 61, 118);
 constexpr uint16_t COLOR_ERROR = rgb565(255, 105, 105);
+// This color is used only as a transparency key while an album cover is
+// already visible on the TFT. It is deliberately absent from the UI palette.
+constexpr uint16_t COLOR_ARTWORK_TRANSPARENT = rgb565(255, 0, 255);
 
 // -------------------------- String helpers -------------------------
 
@@ -533,6 +538,8 @@ void drawMonitoringScreen() {
 }
 
 void drawDisplay() {
+  const bool showSpotifyArtwork = shouldDrawSpotifyArtwork();
+
   canvas.fillSprite(COLOR_BG);
 
   if (pcOnline && mediaPlaying) {
@@ -541,8 +548,27 @@ void drawDisplay() {
     drawMonitoringScreen();
   }
 
-  canvas.pushSprite(0, 0);
-  drawFullColorSpotifyArtwork();
+  if (showSpotifyArtwork && spotifyArtworkVisibleOnTft) {
+    // Preserve the full-color artwork already on the LCD. Without this
+    // transparent window, the once-per-second UI refresh briefly paints the
+    // panel background over the cover before restoring it, which looks like
+    // flashing.
+    canvas.fillRect(16, 48, ALBUM_ART_WIDTH, ALBUM_ART_HEIGHT,
+                    COLOR_ARTWORK_TRANSPARENT);
+    canvas.pushSprite(0, 0, COLOR_ARTWORK_TRANSPARENT);
+  } else {
+    // A page transition needs one complete opaque frame so no pixels from the
+    // previous page remain behind the new layout.
+    canvas.pushSprite(0, 0);
+  }
+
+  if (showSpotifyArtwork &&
+      (!spotifyArtworkVisibleOnTft || spotifyArtworkNeedsRefresh)) {
+    drawFullColorSpotifyArtwork();
+    spotifyArtworkNeedsRefresh = false;
+  }
+
+  spotifyArtworkVisibleOnTft = showSpotifyArtwork;
   displayDirty = false;
   lastDrawMs = millis();
 }
@@ -611,6 +637,7 @@ void handlePcUpdate() {
     const String artworkState = webServer.arg("art");
     if (artworkState == "clear") {
       spotifyAlbumArtAvailable = false;
+      spotifyArtworkNeedsRefresh = false;
     } else if (artworkState == "ready" && !spotifyAlbumArtAvailable) {
       requestedArtworkMissing = true;
     }
@@ -672,6 +699,7 @@ void handleAlbumArtUpload() {
         albumArtUploadValid && albumArtUploadBytes == ALBUM_ART_BYTE_COUNT;
     if (albumArtUploadValid) {
       spotifyAlbumArtAvailable = true;
+      spotifyArtworkNeedsRefresh = true;
       displayDirty = true;
     }
     return;
