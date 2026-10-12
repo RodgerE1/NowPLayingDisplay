@@ -86,7 +86,7 @@ Right-click the tray icon for:
 - **Restart sender** (or **Start sender** if it stopped)
 - **Stop and exit** — stops the sender and removes the tray icon
 
-If the sender process exits unexpectedly, the tray controller restarts it automatically after two seconds. Recovery is intentionally silent: it does not create notification toasts or play Windows alert sounds. It stops trying after five unexpected exits within five minutes so a persistent fault cannot create an endless restart loop; use **View log** before starting it again.
+The tray controller never creates notification toasts or plays Windows alert sounds. If the sender process exits completely, it remains stopped instead of entering a restart loop; use **View log**, then choose **Start sender** from the tray menu. Python-level and connection failures are still recovered inside the sender without exiting the process.
 
 The older `2_RUN_PC_SENDER_HIDDEN.vbs` remains for existing shortcuts, but it now opens this same tray controller instead of launching an invisible sender.
 
