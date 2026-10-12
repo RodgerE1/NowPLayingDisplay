@@ -92,16 +92,18 @@ def acquire_sender_instance() -> bool:
     if sys.platform != "win32":
         return True
 
-    kernel32 = ctypes.windll.kernel32
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     create_mutex = kernel32.CreateMutexW
     create_mutex.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
     create_mutex.restype = ctypes.c_void_p
 
+    ctypes.set_last_error(0)
     handle = create_mutex(None, False, SENDER_MUTEX_NAME)
+    last_error = ctypes.get_last_error()
     if not handle:
         return False
 
-    if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+    if last_error == ERROR_ALREADY_EXISTS:
         kernel32.CloseHandle(handle)
         return False
 
