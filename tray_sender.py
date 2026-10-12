@@ -8,7 +8,6 @@ import subprocess
 import sys
 import threading
 import time
-from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -33,9 +32,6 @@ LOG_FILE = PROJECT_FOLDER / "pc_sender.log"
 MUTEX_NAME = "Local\\ESP32RoomPCDisplayTray_Rodger"
 ERROR_ALREADY_EXISTS = 183
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-AUTO_RESTART_DELAY_SECONDS = 2.0
-AUTO_RESTART_LIMIT = 5
-AUTO_RESTART_WINDOW_SECONDS = 300.0
 
 _mutex_handle: int | None = None
 _sender_process: subprocess.Popen[Any] | None = None
@@ -64,17 +60,19 @@ def acquire_single_instance() -> bool:
     if sys.platform != "win32":
         return True
 
-    kernel32 = ctypes.windll.kernel32
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     create_mutex = kernel32.CreateMutexW
     create_mutex.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
     create_mutex.restype = ctypes.c_void_p
 
+    ctypes.set_last_error(0)
     handle = create_mutex(None, False, MUTEX_NAME)
+    last_error = ctypes.get_last_error()
     if not handle:
         show_message("Windows could not create the tray-app lock.", error=True)
         return False
 
-    if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+    if last_error == ERROR_ALREADY_EXISTS:
         kernel32.CloseHandle(handle)
         show_message("The ESP32 display tray app is already running.")
         return False
@@ -248,7 +246,6 @@ def stop_and_exit(icon: Any, _item: Any = None) -> None:
 
 def monitor_sender() -> None:
     previous_running = sender_is_running()
-    automatic_restarts: deque[float] = deque()
 
     while not _shutdown_event.wait(1.0):
         running = sender_is_running()
@@ -256,22 +253,6 @@ def monitor_sender() -> None:
             continue
 
         update_tray_status()
-        if previous_running and not running and _tray_icon is not None:
-            now = time.monotonic()
-            while (
-                automatic_restarts
-                and now - automatic_restarts[0]
-                > AUTO_RESTART_WINDOW_SECONDS
-            ):
-                automatic_restarts.popleft()
-
-            restart_allowed = len(automatic_restarts) < AUTO_RESTART_LIMIT
-            if restart_allowed:
-                if _shutdown_event.wait(AUTO_RESTART_DELAY_SECONDS):
-                    break
-                if start_sender():
-                    automatic_restarts.append(time.monotonic())
-                    running = True
         previous_running = running
 
 
