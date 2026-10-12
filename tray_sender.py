@@ -49,10 +49,12 @@ def show_message(
     title: str = "ESP32 Room + PC Display",
     error: bool = False,
 ) -> None:
-    """Display a message even though this program runs under pythonw.exe."""
+    """Display a visual message without triggering a Windows alert sound."""
     if sys.platform == "win32":
-        icon_flag = 0x10 if error else 0x40
-        ctypes.windll.user32.MessageBoxW(None, message, title, icon_flag)
+        # Icon-style MessageBox flags play the associated Windows system sound.
+        # Keep the useful visual dialog, but omit the audible alert flags.
+        _ = error
+        ctypes.windll.user32.MessageBoxW(None, message, title, 0x00000000)
 
 
 def acquire_single_instance() -> bool:
@@ -264,38 +266,12 @@ def monitor_sender() -> None:
                 automatic_restarts.popleft()
 
             restart_allowed = len(automatic_restarts) < AUTO_RESTART_LIMIT
-            try:
-                _tray_icon.notify(
-                    "The display sender stopped unexpectedly. "
-                    + (
-                        "Restarting it automatically."
-                        if restart_allowed
-                        else "It stopped repeatedly; open the log before "
-                        "starting it again."
-                    ),
-                    "ESP32 Room + PC Display",
-                )
-            except (AttributeError, NotImplementedError, RuntimeError):
-                pass
-
             if restart_allowed:
                 if _shutdown_event.wait(AUTO_RESTART_DELAY_SECONDS):
                     break
                 if start_sender():
                     automatic_restarts.append(time.monotonic())
                     running = True
-                    if _tray_icon is not None:
-                        try:
-                            _tray_icon.notify(
-                                "The display sender was restarted automatically.",
-                                "ESP32 Room + PC Display",
-                            )
-                        except (
-                            AttributeError,
-                            NotImplementedError,
-                            RuntimeError,
-                        ):
-                            pass
         previous_running = running
 
 
